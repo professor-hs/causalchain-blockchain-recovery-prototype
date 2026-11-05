@@ -9,11 +9,8 @@ import {
 } from '../../types';
 
 /**
- * Build Causal Dependency Graph G = (N, E) and execute BFS Uncertainty Propagation:
+ * Build Causal Dependency Graph G = (N, E) and execute O(N + E) BFS Uncertainty Propagation:
  * U(k+1) = U(k) ∪ {v | there exists u in U(k) and a causal edge u -> v}
- *
- * Importantly, transactions that operate on disjoint state objects without causal edges
- * from U(k) are NOT marked affected and remain VERIFIED_UNAFFECTED.
  */
 export function buildCausalGraphAndPropagate(
   checkpoint: CheckpointRecord | null,
@@ -25,7 +22,6 @@ export function buildCausalGraphAndPropagate(
   const edges: CausalEdge[] = [];
   let edgeCounter = 1;
 
-  // 1. Add Checkpoint Node if available
   if (checkpoint) {
     const ckptNodeId = `CKPT:${checkpoint.checkpointId}`;
     nodesMap.set(ckptNodeId, {
@@ -64,9 +60,11 @@ export function buildCausalGraphAndPropagate(
     }
   }
 
-  // Track producer of each state@version for READ_AFTER_WRITE and WRITE_AFTER_WRITE edges
   const stateVersionProducer = new Map<string, string>();
-  const latestStateNodeByKey = new Map<string, { nodeId: string; version: number; txId?: string }>();
+  const latestStateNodeByKey = new Map<
+    string,
+    { nodeId: string; version: number; txId?: string }
+  >();
 
   if (checkpoint) {
     for (const s of checkpoint.stateObjects) {
@@ -83,7 +81,6 @@ export function buildCausalGraphAndPropagate(
     (a, b) => a.executionSequence - b.executionSequence
   );
 
-  // 2. Add Transaction Nodes and resulting State-Version Nodes
   for (const exec of sortedExec) {
     const txNodeId = `TX:${exec.transactionId}`;
     nodesMap.set(txNodeId, {
@@ -97,7 +94,6 @@ export function buildCausalGraphAndPropagate(
       evidenceRefs: [exec.evidenceId],
     });
 
-    // Read dependencies (READ_AFTER_WRITE)
     for (const read of exec.stateObjectsRead) {
       const readKey = `${read.stateId}@v${read.versionRead}`;
       const producerNodeId = stateVersionProducer.get(readKey);
@@ -113,7 +109,6 @@ export function buildCausalGraphAndPropagate(
           explanation: `Read-After-Write: ${exec.transactionId} reads ${readKey} produced by ${producerNodeId}.`,
         });
       } else {
-        // Missing predecessor state version -> UNRESOLVED_DEPENDENCY node
         const unresolvedNodeId = `UNRESOLVED:${readKey}`;
         if (!nodesMap.has(unresolvedNodeId)) {
           nodesMap.set(unresolvedNodeId, {
@@ -140,7 +135,6 @@ export function buildCausalGraphAndPropagate(
       }
     }
 
-    // Write dependencies (WRITE_AFTER_WRITE & STATE_VERSION_LINEAGE)
     for (const write of exec.stateObjectsWritten) {
       const stateNodeId = `STATE:${write.stateId}@v${write.resultingVersion}`;
       const prevStateNodeId = `STATE:${write.stateId}@v${write.previousVersion}`;
@@ -158,7 +152,6 @@ export function buildCausalGraphAndPropagate(
         evidenceRefs: [exec.evidenceId],
       });
 
-      // Edge from Transaction -> Written State Version
       edges.push({
         id: `EDGE-${edgeCounter++}`,
         source: txNodeId,
@@ -169,7 +162,6 @@ export function buildCausalGraphAndPropagate(
         explanation: `${exec.transactionId} writes ${write.stateId}@v${write.resultingVersion}.`,
       });
 
-      // State version lineage edge from previous version -> transaction/new version
       if (nodesMap.has(prevStateNodeId)) {
         edges.push({
           id: `EDGE-${edgeCounter++}`,
@@ -204,7 +196,6 @@ export function buildCausalGraphAndPropagate(
     }
   }
 
-  // 3. Seed U(0) from active Disagreements (Δi = '1' or Δi = '⊥')
   const initialUncertainSet = new Set<string>();
   const unresolvedDependencyNodes = new Set<string>();
 
@@ -215,12 +206,13 @@ export function buildCausalGraphAndPropagate(
     }
   }
 
+  const storById = new Map(storageEvidence.map((s) => [s.evidenceId, s]));
+
   for (const dis of disagreements) {
     if (dis.indicator === '0') continue;
 
     const txNodeId = `TX:${dis.transactionId}`;
     if (!nodesMap.has(txNodeId)) {
-      // e.g., STORAGE_WITHOUT_EXECUTION where transaction was not in executionEvidence
       nodesMap.set(txNodeId, {
         id: txNodeId,
         label: `Unverified Tx ${dis.transactionId}`,
@@ -238,23 +230,19 @@ export function buildCausalGraphAndPropagate(
       existing.visualState = dis.indicator === '⊥' ? 'UNRESOLVED' : 'INCONSISTENT';
       existing.propagationStep = 0;
       existing.inclusionReason = `Direct ${dis.disagreementType} (Δi = ${dis.indicator}) on ${dis.stateObjectId}: ${dis.detectionExplanation}`;
-      existing.evidenceRefs = Array.from(
-        new Set([...existing.evidenceRefs, ...dis.evidenceReferences])
-      );
     }
     initialUncertainSet.add(txNodeId);
     if (dis.indicator === '⊥') {
       unresolvedDependencyNodes.add(txNodeId);
     }
 
-    // Also mark or create the disputed state object version node
     const ver = dis.expectedVersion ?? dis.observedVersion;
     if (ver !== undefined) {
       const stateNodeId = `STATE:${dis.stateObjectId}@v${ver}`;
       if (!nodesMap.has(stateNodeId)) {
-        const storRec = storageEvidence.find((s) =>
-          dis.evidenceReferences.includes(s.evidenceId)
-        );
+        const storRec = dis.evidenceReferences
+          .map((id) => storById.get(id))
+          .find(Boolean);
         nodesMap.set(stateNodeId, {
           id: stateNodeId,
           label: `${dis.stateObjectId} @ v${ver} (Disputed)`,
@@ -286,29 +274,18 @@ export function buildCausalGraphAndPropagate(
       if (dis.indicator === '⊥') {
         unresolvedDependencyNodes.add(stateNodeId);
       }
-
-      // Connect any downstream state versions on the same stateId that depended on dis.stateObjectId
-      for (const n of nodesMap.values()) {
-        if (
-          n.stateObjectId === dis.stateObjectId &&
-          n.id !== stateNodeId &&
-          (n.stateVersion === undefined || n.stateVersion >= ver)
-        ) {
-          edges.push({
-            id: `EDGE-${edgeCounter++}`,
-            source: stateNodeId,
-            target: n.id,
-            dependencyType: 'STATE_VERSION_LINEAGE',
-            stateObjectId: dis.stateObjectId,
-            propagatesUncertainty: true,
-            explanation: `Downstream lineage dependency on disputed state ${dis.stateObjectId}.`,
-          });
-        }
-      }
     }
   }
 
-  // 4. Execute iterative BFS propagation: U(k+1) = U(k) ∪ {v | ∃ u ∈ U(k), (u -> v) ∈ E}
+  // Build adjacency list for O(N + E) BFS traversal
+  const outgoingBySource = new Map<string, CausalEdge[]>();
+  for (const e of edges) {
+    if (!e.propagatesUncertainty) continue;
+    const list = outgoingBySource.get(e.source);
+    if (list) list.push(e);
+    else outgoingBySource.set(e.source, [e]);
+  }
+
   const directlyInconsistentNodes = Array.from(initialUncertainSet);
   const visited = new Set<string>(initialUncertainSet);
   const transitivelyAffectedNodes: string[] = [];
@@ -329,7 +306,7 @@ export function buildCausalGraphAndPropagate(
 
     for (const u of frontier) {
       const uNode = nodesMap.get(u);
-      const outgoing = edges.filter((e) => e.source === u && e.propagatesUncertainty);
+      const outgoing = outgoingBySource.get(u) || [];
 
       for (const edge of outgoing) {
         const v = edge.target;
@@ -342,7 +319,9 @@ export function buildCausalGraphAndPropagate(
           if (vNode) {
             vNode.propagationStep = step;
             const inheritedUnresolved = uNode?.visualState === 'UNRESOLVED';
-            vNode.visualState = inheritedUnresolved ? 'UNRESOLVED' : 'POTENTIALLY_AFFECTED';
+            vNode.visualState = inheritedUnresolved
+              ? 'UNRESOLVED'
+              : 'POTENTIALLY_AFFECTED';
             if (inheritedUnresolved) {
               unresolvedDependencyNodes.add(v);
             }
@@ -363,7 +342,6 @@ export function buildCausalGraphAndPropagate(
     step++;
   }
 
-  // 5. Mark remaining non-visited nodes as VERIFIED_UNAFFECTED
   const verifiedUnaffectedNodes: string[] = [];
   for (const node of nodesMap.values()) {
     if (!visited.has(node.id)) {

@@ -55,7 +55,7 @@ export function normalizeStorageEvidence(records: StorageEvidence[]): StorageEvi
 }
 
 /**
- * Correlate normalized execution evidence units against storage-operation evidence records.
+ * Correlate normalized execution evidence units against storage-operation evidence records in O(N log N) time.
  */
 export function correlateEvidence(
   executionRecords: ExecutionEvidence[],
@@ -67,7 +67,7 @@ export function correlateEvidence(
   const matchedStorageIds = new Set<string>();
   const now = new Date().toISOString();
 
-  // Detect relative ordering inversions across transactions present in both streams
+  // Detect relative ordering inversions in O(N log N)
   const execOrderByTx = new Map<string, number>();
   for (const u of execUnits) {
     if (!execOrderByTx.has(u.transactionId)) {
@@ -82,37 +82,51 @@ export function correlateEvidence(
   }
 
   const orderingInversionTxs = new Set<string>();
-  const sharedTxs = [...execOrderByTx.keys()].filter((tx) => storageOrderByTx.has(tx));
-  for (let i = 0; i < sharedTxs.length; i++) {
-    for (let j = i + 1; j < sharedTxs.length; j++) {
-      const txA = sharedTxs[i];
-      const txB = sharedTxs[j];
-      const execDiff = (execOrderByTx.get(txA) ?? 0) - (execOrderByTx.get(txB) ?? 0);
-      const storDiff = (storageOrderByTx.get(txA) ?? 0) - (storageOrderByTx.get(txB) ?? 0);
-      if (execDiff * storDiff < 0) {
-        orderingInversionTxs.add(txA);
-        orderingInversionTxs.add(txB);
-      }
+  const sharedTxs = [...execOrderByTx.keys()]
+    .filter((tx) => storageOrderByTx.has(tx))
+    .sort((a, b) => (execOrderByTx.get(a) ?? 0) - (execOrderByTx.get(b) ?? 0));
+
+  let maxStorOrderSeen = -Infinity;
+  let maxStorTxSeen = '';
+  for (const tx of sharedTxs) {
+    const sOrder = storageOrderByTx.get(tx) ?? 0;
+    if (sOrder < maxStorOrderSeen) {
+      orderingInversionTxs.add(tx);
+      if (maxStorTxSeen) orderingInversionTxs.add(maxStorTxSeen);
+    } else {
+      maxStorOrderSeen = sOrder;
+      maxStorTxSeen = tx;
+    }
+  }
+
+  // Index storage units by (transactionId, affectedStateObject) for O(1) lookup
+  const storageByTxAndState = new Map<string, StorageEvidence[]>();
+  const ambiguousByState = new Map<string, StorageEvidence[]>();
+
+  for (const s of storageUnits) {
+    const key = `${s.transactionId}::${s.affectedStateObject}`;
+    const list = storageByTxAndState.get(key);
+    if (list) list.push(s);
+    else storageByTxAndState.set(key, [s]);
+
+    if (s.transactionId === 'UNKNOWN' || s.commitStatus === 'UNKNOWN') {
+      const ambList = ambiguousByState.get(s.affectedStateObject);
+      if (ambList) ambList.push(s);
+      else ambiguousByState.set(s.affectedStateObject, [s]);
     }
   }
 
   let counter = 1;
 
   for (const exec of execUnits) {
-    const candidates = storageUnits.filter(
-      (s) =>
-        !matchedStorageIds.has(s.evidenceId) &&
-        s.transactionId === exec.transactionId &&
-        s.affectedStateObject === exec.stateObjectId
-    );
+    const key = `${exec.transactionId}::${exec.stateObjectId}`;
+    const bucket = storageByTxAndState.get(key) || [];
+    const stor = bucket.find((s) => !matchedStorageIds.has(s.evidenceId));
 
-    if (candidates.length === 0) {
-      // Check if there is an unlinked or ambiguous storage record on the same state object
-      const ambiguousOnState = storageUnits.find(
-        (s) =>
-          !matchedStorageIds.has(s.evidenceId) &&
-          s.affectedStateObject === exec.stateObjectId &&
-          (s.transactionId === 'UNKNOWN' || s.commitStatus === 'UNKNOWN')
+    if (!stor) {
+      const ambBucket = ambiguousByState.get(exec.stateObjectId) || [];
+      const ambiguousOnState = ambBucket.find(
+        (s) => !matchedStorageIds.has(s.evidenceId)
       );
 
       if (ambiguousOnState) {
@@ -151,7 +165,6 @@ export function correlateEvidence(
       continue;
     }
 
-    const stor = candidates[0];
     matchedStorageIds.add(stor.evidenceId);
 
     let category: CorrelationCategory = 'MATCHED';
@@ -204,7 +217,6 @@ export function correlateEvidence(
     });
   }
 
-  // Remaining unmatched storage records -> STORAGE_WITHOUT_EXECUTION
   for (const stor of storageUnits) {
     if (!matchedStorageIds.has(stor.evidenceId)) {
       results.push({

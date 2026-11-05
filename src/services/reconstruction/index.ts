@@ -140,9 +140,10 @@ export async function reconstructSelectiveState(
     (a, b) => a.executionSequence - b.executionSequence
   );
 
+  const execByTxId = new Map(sortedExec.map((e) => [e.transactionId, e]));
   const missingTransitions: string[] = [];
   for (const txId of relevantTxSet) {
-    const found = sortedExec.find((e) => e.transactionId === txId);
+    const found = execByTxId.get(txId);
     if (
       !found ||
       found.authenticationStatus !== 'AUTHENTICATED' ||
@@ -249,16 +250,12 @@ export async function reconstructSelectiveState(
         };
       }
 
-      const updatedBase = {
+      workingStateMap.set(write.stateId, {
         stateId: write.stateId,
         currentValue: write.newValue,
         stateVersion: write.resultingVersion,
         lastTransaction: exec.transactionId,
-      };
-      const newHash = await computeStateObjectHash(updatedBase);
-      workingStateMap.set(write.stateId, {
-        ...updatedBase,
-        integrityHash: newHash,
+        integrityHash: currentObj.integrityHash,
       });
 
       appliedTransitions.push({
@@ -270,6 +267,23 @@ export async function reconstructSelectiveState(
         previousValue: write.previousValue ?? currentObj.currentValue,
         newValue: write.newValue,
         verifiedByEvidenceId: exec.evidenceId,
+      });
+    }
+  }
+
+  // Recompute SHA-256 integrity hashes for all reconstructed state objects in SB
+  for (const stateId of boundaryStateSet) {
+    const obj = workingStateMap.get(stateId);
+    if (obj) {
+      const newHash = await computeStateObjectHash({
+        stateId: obj.stateId,
+        currentValue: obj.currentValue,
+        stateVersion: obj.stateVersion,
+        lastTransaction: obj.lastTransaction,
+      });
+      workingStateMap.set(stateId, {
+        ...obj,
+        integrityHash: newHash,
       });
     }
   }

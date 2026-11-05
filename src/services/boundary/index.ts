@@ -91,8 +91,9 @@ export async function certifyCausalBoundary(
       );
     }
   }
+  const nodesById = new Map(causalGraph.nodes.map((n) => [n.id, n]));
   for (const uNodeId of causalGraph.unresolvedDependencyNodes) {
-    const node = causalGraph.nodes.find((n) => n.id === uNodeId);
+    const node = nodesById.get(uNodeId);
     if (node && node.nodeType === 'UNCERTAIN_DEPENDENCY') {
       unresolvedUncertainty.push(`Missing dependency lineage: ${node.label}`);
     }
@@ -106,7 +107,7 @@ export async function certifyCausalBoundary(
     causalGraph.unresolvedDependencyNodes.length === 0 ||
     policy.allowConservativeProvisionalBoundary;
   const allAffectedStateIncluded = Array.from(affectedNodeIds).every((id) => {
-    const n = causalGraph.nodes.find((node) => node.id === id);
+    const n = nodesById.get(id);
     return !n?.stateObjectId || stateObjectsSet.has(n.stateObjectId);
   });
 
