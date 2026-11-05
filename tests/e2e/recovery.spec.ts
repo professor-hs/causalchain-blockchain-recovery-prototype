@@ -1,16 +1,34 @@
 import { test, expect } from '@playwright/test';
 
+const ARTIFACT_DIR =
+  'C:/Users/HP/.gemini/antigravity/brain/146b85c2-5bdf-4a65-8ed7-e897e8fec1c9';
+
 test.describe('CAUSALCHAIN E2E Patent Verification Suite', () => {
   test('1. Successful Bounded Recovery Scenario (Scenario H) & Navigation Verification', async ({
     page,
   }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/');
-    await expect(page.locator('text=CAUSALCHAIN')).toBeVisible();
+    await expect(page.locator('text=CAUSALCHAIN').first()).toBeVisible();
 
     // Default loads Scenario H -> ACCEPTED
     await expect(page.getByTestId('overview-protocol-decision')).toHaveText(
       'ACCEPTED'
     );
+    await page.screenshot({
+      path: `${ARTIFACT_DIR}/causalchain_overview.png`,
+      fullPage: true,
+    });
+
+    // Navigate to Causal Dependency Graph
+    await page.getByTestId('nav-causal-graph').click();
+    await expect(
+      page.locator('text=Causal Dependency Graph & Uncertainty Propagation Engine')
+    ).toBeVisible();
+    await page.screenshot({
+      path: `${ARTIFACT_DIR}/causalchain_causal_graph.png`,
+      fullPage: true,
+    });
 
     // Navigate to Boundary Certification
     await page.getByTestId('nav-boundary').click();
@@ -23,6 +41,20 @@ test.describe('CAUSALCHAIN E2E Patent Verification Suite', () => {
     await expect(page.getByTestId('reconstruction-status-badge')).toHaveText(
       'COMPLETED'
     );
+    await page.screenshot({
+      path: `${ARTIFACT_DIR}/causalchain_reconstruction.png`,
+      fullPage: true,
+    });
+
+    // Navigate to Experiments & Benchmarks
+    await page.getByTestId('nav-experiments').click();
+    await expect(
+      page.locator('text=Experiment & Attack Simulation Laboratory')
+    ).toBeVisible();
+    await page.screenshot({
+      path: `${ARTIFACT_DIR}/causalchain_experiments_benchmarks.png`,
+      fullPage: true,
+    });
   });
 
   test('2. Insufficient Evidence Scenario (Scenario B) Suspends Reconstruction', async ({
